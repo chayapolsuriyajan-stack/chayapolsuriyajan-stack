@@ -6,7 +6,7 @@ const zlib = require('zlib');
 const { loadScene } = require('./glb-loader.js');
 
 const SRC = process.env.SRC || 'source/2010_vertex_edge_nissan_s15_silvia.glb';
-const FRAMES = +(process.env.FRAMES || 24);
+const FRAMES = +(process.env.FRAMES || 144);       // 144 frames / 9s loop = 16fps
 const W = +(process.env.OW || 420), H = +(process.env.OH || 288);
 const SS = +(process.env.SS || 3);
 const RW = W * SS, RH = H * SS;
@@ -142,7 +142,7 @@ function renderFrame(yaw) {
   const buf = new Float32Array(RW * RH).fill(1.0);
   const shadowBuf = new Float32Array(RW * RH).fill(1.0);
   const zbuf = new Float32Array(RW * RH).fill(Infinity);
-  const pitch = -30 * Math.PI / 180, dist = 7.4, f = RW * 1.52;
+  const pitch = -18 * Math.PI / 180, dist = 7.4, f = RW * 1.38;
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
   const CY = CAR_H * 0.48;
@@ -156,7 +156,7 @@ function renderFrame(yaw) {
     const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
     return [x1, y * cp - z1 * sp, y * sp + z1 * cp];
   };
-  const project = v => [RW / 2 + f * v[0] / v[2], RH / 2 - f * v[1] / v[2] + RH * 0.05, v[2]];
+  const project = v => [RW / 2 + f * v[0] / v[2], RH / 2 - f * v[1] / v[2] + RH * 0.02, v[2]];
 
   const norm = d => { const m = Math.hypot(...d); return d.map(c => c / m); };
   const L2 = norm([0.78, 0.22, -0.30]);     // camera-relative fill, keeps the far side legible
