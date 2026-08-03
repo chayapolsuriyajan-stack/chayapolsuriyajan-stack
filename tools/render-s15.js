@@ -61,7 +61,7 @@ scene.materials.forEach((m, i) => {
 
 const OPAQUE_TRIS = scene.tris.filter(t => !GLASS.has(t[3]));
 const GLASS_TRIS = scene.tris.filter(t => GLASS.has(t[3]));
-const GLASS_ALPHA = 0.42;
+const GLASS_ALPHA = 0.12;                 // barely tinted, so the interior reads clearly
 
 // ---------- shadow map (built once, in object space) ----------
 // The key light is fixed to the car body (not the camera), so real cast
@@ -140,6 +140,7 @@ const shadowVisibility = (() => {
 // ---------- render ----------
 function renderFrame(yaw) {
   const buf = new Float32Array(RW * RH).fill(1.0);
+  const shadowBuf = new Float32Array(RW * RH).fill(1.0);
   const zbuf = new Float32Array(RW * RH).fill(Infinity);
   const pitch = -30 * Math.PI / 180, dist = 7.4, f = RW * 1.52;
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
@@ -209,7 +210,7 @@ function renderFrame(yaw) {
       const fill = Math.max(0, n[0] * L2[0] + n[1] * L2[1] + n[2] * L2[2]);
       const sky = 0.5 + 0.5 * nO[1];
       const rim = Math.pow(1 - facing, 3.4);
-      const l = alb * (0.03 + 0.08 * sky + 1.00 * Math.pow(key, 1.32) + 0.10 * fill) + rim * 0.24 * alb;
+      const l = alb * (0.11 + 0.11 * sky + 0.86 * Math.pow(key, 1.25) + 0.13 * fill) + rim * 0.24 * alb;
       lu.push(Math.max(0, Math.min(1, l)));
     }
     return { p, lu };
@@ -233,7 +234,7 @@ function renderFrame(yaw) {
       for (let i = 0; i + 1 < xs.length; i += 2)
         for (let px = Math.max(0, Math.ceil(xs[i])); px <= Math.min(RW - 1, Math.floor(xs[i + 1])); px++) {
           const j = py * RW + px;
-          if (buf[j] === 1.0) buf[j] = 0.855;
+          if (buf[j] === 1.0) shadowBuf[j] = 0.72;
         }
     }
   }
@@ -250,12 +251,17 @@ function renderFrame(yaw) {
   }
 
   const small = new Float32Array(W * H);
+  const smallShadow = new Float32Array(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    let s = 0;
-    for (let dy = 0; dy < SS; dy++) for (let dx = 0; dx < SS; dx++) s += buf[(y * SS + dy) * RW + (x * SS + dx)];
+    let s = 0, sh = 0;
+    for (let dy = 0; dy < SS; dy++) for (let dx = 0; dx < SS; dx++) {
+      const idx = (y * SS + dy) * RW + (x * SS + dx);
+      s += buf[idx]; sh += shadowBuf[idx];
+    }
     small[y * W + x] = s / (SS * SS);
+    smallShadow[y * W + x] = sh / (SS * SS);
   }
-  return small;
+  return { lum: small, shadow: smallShadow };
 }
 
 // ---------- Bayer 8x8 ordered dither ----------
@@ -276,14 +282,23 @@ const BAYER = (() => {
 })();
 
 // RGBA: "paper" pixels go fully transparent so the card has no background of its
-// own and just sits on whatever page (or theme) it's viewed against.
-function dither(lum, ink) {
+// own and just sits on whatever page (or theme) it's viewed against. The ground
+// shadow is dithered separately, always with SHADOW_INK - a cast shadow reads as
+// darker-than-the-page in both themes, so it must never swap to the light ink
+// used for the car body in dark mode (that would turn it into a glow).
+const SHADOW_INK = [0x00, 0x00, 0x00];
+function dither(lum, shadow, ink) {
   const px = Buffer.alloc(W * H * 4);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const isInk = lum[y * W + x] <= BAYER[y & 7][x & 7];
     const o = (y * W + x) * 4;
-    if (isInk) { px[o] = ink[0]; px[o + 1] = ink[1]; px[o + 2] = ink[2]; px[o + 3] = 255; }
-    else px[o + 3] = 0;
+    const t = BAYER[y & 7][x & 7];
+    const l = lum[y * W + x];
+    if (l < 1.0) {
+      if (l <= t) { px[o] = ink[0]; px[o + 1] = ink[1]; px[o + 2] = ink[2]; px[o + 3] = 255; }
+    } else {
+      const s = shadow[y * W + x];
+      if (s < 1.0 && s <= t) { px[o] = SHADOW_INK[0]; px[o + 1] = SHADOW_INK[1]; px[o + 2] = SHADOW_INK[2]; px[o + 3] = 140; }
+    }
   }
   return px;
 }
@@ -326,11 +341,11 @@ function pngRGBA(rgba, w, h) {
 
 // ---------- output ----------
 if (process.env.GRAY !== undefined) {
-  const lum = renderFrame(parseFloat(process.env.GRAY));
+  const { lum, shadow } = renderFrame(parseFloat(process.env.GRAY));
   const g = Buffer.alloc(W * H * 3);
-  for (let i = 0; i < W * H; i++) { const v = Math.round(lum[i] * 255); g[i * 3] = v; g[i * 3 + 1] = v; g[i * 3 + 2] = v; }
+  for (let i = 0; i < W * H; i++) { const v = Math.round(Math.min(lum[i], shadow[i]) * 255); g[i * 3] = v; g[i * 3 + 1] = v; g[i * 3 + 2] = v; }
   fs.writeFileSync('gray.png', png(g, W, H));
-  fs.writeFileSync('dith.png', pngRGBA(dither(lum, INK), W, H));
+  fs.writeFileSync('dith.png', pngRGBA(dither(lum, shadow, INK), W, H));
   console.log(`car ${CAR_LENGTH.toFixed(2)} x ${CAR_W.toFixed(2)} x ${CAR_H.toFixed(2)} m - wrote gray.png + dith.png`);
   process.exit(0);
 }
@@ -359,7 +374,7 @@ const kt = [];
 for (let i = 0; i <= FRAMES; i++) kt.push((i / FRAMES).toFixed(5));
 
 function buildSvg(path, ink, textColor) {
-  const b64 = lums.map(lum => pngRGBA(dither(lum, ink), W, H).toString('base64'));
+  const b64 = lums.map(({ lum, shadow }) => pngRGBA(dither(lum, shadow, ink), W, H).toString('base64'));
   const images = b64.map((d, i) => {
     const vals = [];
     for (let k = 0; k <= FRAMES; k++) vals.push((k % FRAMES === i) ? 1 : 0);
