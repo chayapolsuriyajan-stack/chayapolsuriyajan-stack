@@ -6,9 +6,18 @@ Regenerates the halftone S15 animation in `assets/`.
 node tools/render-s15.js assets/s15-rotate.svg
 ```
 
+Writes two files, `assets/s15-rotate-light.svg` and `assets/s15-rotate-dark.svg`
+(the `.svg` suffix on the argument is replaced with `-light.svg` / `-dark.svg`).
+Both have a fully transparent background — no card, no colour to match — so
+README.md picks between them with a `<picture>` tag driven by
+`prefers-color-scheme`, which is how GitHub actually switches images for its
+light/dark toggle (a CSS media query *inside* an embedded SVG only follows the
+OS theme, not GitHub's own switch, so that approach doesn't work here).
+
 - `glb-loader.js` — minimal glTF 2.0 / GLB parser (node hierarchy, accessors, TRS matrices).
-- `render-s15.js` — software rasteriser (z-buffer, Gouraud shading) → Bayer 8×8 ordered
-  dither → hand-rolled PNG encoder → animated SVG with the frames inlined as data URIs.
+- `render-s15.js` — software rasteriser (z-buffer, per-vertex shading, a real shadow-map
+  pass for cast shadows, alpha-blended glass) → Bayer 8×8 ordered dither → hand-rolled
+  RGBA PNG encoder → animated SVG with the frames inlined as data URIs.
 
 No dependencies; plain Node.
 
@@ -16,14 +25,14 @@ No dependencies; plain Node.
 
 | Env | Default | Meaning |
 |-----|---------|---------|
-| `SRC` | `source/2000 Nissan Silvia Varietta (S15).glb` | input model |
-| `OW` / `OH` | `420` / `288` | output pixel size (use `OH=252` for the current crop) |
+| `SRC` | `source/2010_vertex_edge_nissan_s15_silvia.glb` | input model |
+| `OW` / `OH` | `420` / `288` | output pixel size (use `OW=460 OH=320` for the current crop) |
 | `SS` | `3` | supersample factor before dithering |
 | `FRAMES` | `24` | rotation frames |
-| `GRAY=<yaw>` | — | render one frame to `gray.png` + `dith.png` for previewing |
+| `GRAY=<yaw>` | — | render one frame to `gray.png` (opaque grayscale) + `dith.png` (dithered, light-ink) for previewing |
 
 Preview a single angle (yaw in radians):
 
 ```bash
-OH=252 GRAY=0.4 node tools/render-s15.js
+OW=460 OH=320 GRAY=0.4 node tools/render-s15.js
 ```

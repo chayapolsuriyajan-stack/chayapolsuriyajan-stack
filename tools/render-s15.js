@@ -5,13 +5,12 @@ const fs = require('fs');
 const zlib = require('zlib');
 const { loadScene } = require('./glb-loader.js');
 
-const SRC = process.env.SRC || 'source/2000 Nissan Silvia Varietta (S15).glb';
+const SRC = process.env.SRC || 'source/2010_vertex_edge_nissan_s15_silvia.glb';
 const FRAMES = +(process.env.FRAMES || 24);
 const W = +(process.env.OW || 420), H = +(process.env.OH || 288);
 const SS = +(process.env.SS || 3);
 const RW = W * SS, RH = H * SS;
-const PAPER = [0xf2, 0xf0, 0xec];
-const INK = [0x17, 0x17, 0x21];
+const INK = [0x17, 0x17, 0x21];           // preview-only (GRAY mode); the build emits both themes' ink below
 const CAR_LENGTH = 4.445;                 // real S15 length, metres
 
 // ---------- load + normalise ----------
@@ -45,19 +44,104 @@ for (let i = 0; i < P.length / 3; i++) {
 }
 const CAR_H = (mx[axUp] - mn[axUp]) * S;
 const CAR_W = (mx[axWid] - mn[axWid]) * S;
+const NV = VX.length / 3;
 
 // dark trim: materials whose base colour is near-black (tyres, rubber, grilles)
 const DARK = new Set();
+// real see-through glass: near-black base colour AND alpha-blended (distinguishes
+// it from opaque black trim and from BLEND body-paint materials, which are near-white)
+const GLASS = new Set();
 scene.materials.forEach((m, i) => {
   const c = (m.pbrMetallicRoughness || {}).baseColorFactor;
-  if (c && (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) < 0.22) DARK.add(i);
+  if (!c) return;
+  const lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  if (lum < 0.22) DARK.add(i);
+  if (lum < 0.05 && m.alphaMode === 'BLEND') GLASS.add(i);
 });
+
+const OPAQUE_TRIS = scene.tris.filter(t => !GLASS.has(t[3]));
+const GLASS_TRIS = scene.tris.filter(t => GLASS.has(t[3]));
+const GLASS_ALPHA = 0.42;
+
+// ---------- shadow map (built once, in object space) ----------
+// The key light is fixed to the car body (not the camera), so real cast
+// shadows sweep across the panels as the turntable rotates.
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = d => { const m = Math.hypot(...d) || 1; return d.map(c => c / m); };
+
+const KEY_DIR = norm3([-0.42, 0.82, 0.55]);  // points FROM surface TOWARD the light
+const SHADOW_RES = 320;
+const SHADOW_BIAS = 0.012;
+
+const shadowVisibility = (() => {
+  const fwd = KEY_DIR.map(c => -c);                       // shadow-cam looks along the light's travel direction
+  let up0 = Math.abs(fwd[1]) > 0.95 ? [1, 0, 0] : [0, 1, 0];
+  const right = norm3(cross3(up0, fwd));
+  const up = cross3(fwd, right);
+
+  const u = new Float32Array(NV), v = new Float32Array(NV), d = new Float32Array(NV);
+  let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
+  for (let i = 0; i < NV; i++) {
+    const p = [VX[i * 3], VX[i * 3 + 1], VX[i * 3 + 2]];
+    u[i] = dot3(p, right); v[i] = dot3(p, up); d[i] = dot3(p, fwd);
+    if (u[i] < umin) umin = u[i]; if (u[i] > umax) umax = u[i];
+    if (v[i] < vmin) vmin = v[i]; if (v[i] > vmax) vmax = v[i];
+  }
+  const pad = 0.06 * Math.max(umax - umin, vmax - vmin);
+  umin -= pad; umax += pad; vmin -= pad; vmax += pad;
+  const su = (SHADOW_RES - 1) / (umax - umin), sv = (SHADOW_RES - 1) / (vmax - vmin);
+
+  const depth = new Float32Array(SHADOW_RES * SHADOW_RES).fill(Infinity);
+  const px = new Float32Array(NV), py = new Float32Array(NV);
+  for (let i = 0; i < NV; i++) { px[i] = (u[i] - umin) * su; py[i] = (v[i] - vmin) * sv; }
+
+  for (const [i0, i1, i2] of scene.tris) {
+    const xs = [px[i0], px[i1], px[i2]], ys = [py[i0], py[i1], py[i2]], ds = [d[i0], d[i1], d[i2]];
+    const y0 = Math.max(0, Math.ceil(Math.min(...ys))), y1 = Math.min(SHADOW_RES - 1, Math.floor(Math.max(...ys)));
+    for (let sy = y0; sy <= y1; sy++) {
+      const xints = [];
+      for (let k = 0; k < 3; k++) {
+        const a = k, b = (k + 1) % 3;
+        if ((ys[a] <= sy && ys[b] > sy) || (ys[b] <= sy && ys[a] > sy)) {
+          const t = (sy - ys[a]) / (ys[b] - ys[a]);
+          xints.push([xs[a] + t * (xs[b] - xs[a]), ds[a] + t * (ds[b] - ds[a])]);
+        }
+      }
+      if (xints.length < 2) continue;
+      xints.sort((m, n) => m[0] - n[0]);
+      const xa = Math.max(0, Math.ceil(xints[0][0])), xb = Math.min(SHADOW_RES - 1, Math.floor(xints[1][0]));
+      const span = xints[1][0] - xints[0][0];
+      for (let sx = xa; sx <= xb; sx++) {
+        const t = span > 1e-9 ? (sx - xints[0][0]) / span : 0;
+        const dz = xints[0][1] + t * (xints[1][1] - xints[0][1]);
+        const idx = sy * SHADOW_RES + sx;
+        if (dz < depth[idx]) depth[idx] = dz;
+      }
+    }
+  }
+
+  const vis = new Float32Array(NV);
+  const TAPS = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]];
+  for (let i = 0; i < NV; i++) {
+    const cx = Math.round(px[i]), cy = Math.round(py[i]);
+    let lit = 0, n = 0;
+    for (const [ox, oy] of TAPS) {
+      const sx = cx + ox, sy = cy + oy;
+      if (sx < 0 || sy < 0 || sx >= SHADOW_RES || sy >= SHADOW_RES) continue;
+      n++;
+      if (d[i] <= depth[sy * SHADOW_RES + sx] + SHADOW_BIAS) lit++;
+    }
+    vis[i] = n ? lit / n : 1;
+  }
+  return vis;
+})();
 
 // ---------- render ----------
 function renderFrame(yaw) {
   const buf = new Float32Array(RW * RH).fill(1.0);
   const zbuf = new Float32Array(RW * RH).fill(Infinity);
-  const pitch = 0.20, dist = 7.4, f = RW * 1.52;
+  const pitch = -30 * Math.PI / 180, dist = 7.4, f = RW * 1.52;
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
   const CY = CAR_H * 0.48;
@@ -74,11 +158,11 @@ function renderFrame(yaw) {
   const project = v => [RW / 2 + f * v[0] / v[2], RH / 2 - f * v[1] / v[2] + RH * 0.05, v[2]];
 
   const norm = d => { const m = Math.hypot(...d); return d.map(c => c / m); };
-  const L = norm([-0.44, 0.66, -0.61]);     // key light, upper-left, camera side
-  const L2 = norm([0.78, 0.22, -0.30]);     // fill from the opposite side
+  const L2 = norm([0.78, 0.22, -0.30]);     // camera-relative fill, keeps the far side legible
 
-  // scanline fill interpolating [z, luminance]
-  function fillTri(p, lum) {
+  // scanline fill interpolating [z, luminance]; `blend` composites onto buf as
+  // translucent glass without writing zbuf, instead of the opaque z-test/write.
+  function fillTri(p, lum, blend) {
     const minY = Math.min(p[0][1], p[1][1], p[2][1]);
     const maxY = Math.max(p[0][1], p[1][1], p[2][1]);
     const y0 = Math.max(0, Math.ceil(minY)), y1 = Math.min(RH - 1, Math.floor(maxY));
@@ -100,9 +184,35 @@ function renderFrame(yaw) {
         const t = span > 1e-9 ? (px - A[0]) / span : 0;
         const z = A[1] + t * (B[1] - A[1]);
         const i = py * RW + px;
-        if (z < zbuf[i]) { zbuf[i] = z; buf[i] = A[2] + t * (B[2] - A[2]); }
+        const lm = A[2] + t * (B[2] - A[2]);
+        if (blend) { if (z < zbuf[i]) buf[i] = buf[i] * (1 - GLASS_ALPHA) + lm * GLASS_ALPHA; }
+        else if (z < zbuf[i]) { zbuf[i] = z; buf[i] = lm; }
       }
     }
+  }
+
+  // per-vertex shading shared by the opaque and glass passes
+  function shadeTri(i0, i1, i2, alb) {
+    const p = [], lu = [];
+    for (const vi of [i0, i1, i2]) {
+      const v = toView(VX[vi * 3], VX[vi * 3 + 1], VX[vi * 3 + 2]);
+      if (v[2] <= 0.05) return null;
+      p.push(project(v));
+      const nObj = [VN[vi * 3], VN[vi * 3 + 1], VN[vi * 3 + 2]];
+      let n = rotDir(nObj[0], nObj[1], nObj[2]);
+      const m = Math.hypot(...v);
+      const vd = [-v[0] / m, -v[1] / m, -v[2] / m];
+      let facing = n[0] * vd[0] + n[1] * vd[1] + n[2] * vd[2];
+      let nO = nObj;
+      if (facing < 0) { n = n.map(c => -c); nO = nObj.map(c => -c); facing = -facing; }   // two-sided shading
+      const key = Math.max(0, nO[0] * KEY_DIR[0] + nO[1] * KEY_DIR[1] + nO[2] * KEY_DIR[2]) * shadowVisibility[vi];
+      const fill = Math.max(0, n[0] * L2[0] + n[1] * L2[1] + n[2] * L2[2]);
+      const sky = 0.5 + 0.5 * nO[1];
+      const rim = Math.pow(1 - facing, 3.4);
+      const l = alb * (0.03 + 0.08 * sky + 1.00 * Math.pow(key, 1.32) + 0.10 * fill) + rim * 0.24 * alb;
+      lu.push(Math.max(0, Math.min(1, l)));
+    }
+    return { p, lu };
   }
 
   // ground contact shadow
@@ -128,27 +238,15 @@ function renderFrame(yaw) {
     }
   }
 
-  for (const [i0, i1, i2, mat] of scene.tris) {
-    const alb = DARK.has(mat) ? 0.13 : 1.0;
-    const p = [], lu = [];
-    let behind = false;
-    for (const vi of [i0, i1, i2]) {
-      const v = toView(VX[vi * 3], VX[vi * 3 + 1], VX[vi * 3 + 2]);
-      if (v[2] <= 0.05) { behind = true; break; }
-      p.push(project(v));
-      let n = rotDir(VN[vi * 3], VN[vi * 3 + 1], VN[vi * 3 + 2]);
-      const m = Math.hypot(...v);
-      const vd = [-v[0] / m, -v[1] / m, -v[2] / m];
-      let facing = n[0] * vd[0] + n[1] * vd[1] + n[2] * vd[2];
-      if (facing < 0) { n = n.map(c => -c); facing = -facing; }   // two-sided shading
-      const key = Math.max(0, n[0] * L[0] + n[1] * L[1] + n[2] * L[2]);
-      const fill = Math.max(0, n[0] * L2[0] + n[1] * L2[1] + n[2] * L2[2]);
-      const sky = 0.5 + 0.5 * n[1];
-      const rim = Math.pow(1 - facing, 3.4);
-      const l = alb * (0.03 + 0.08 * sky + 1.00 * Math.pow(key, 1.32) + 0.10 * fill) + rim * 0.24 * alb;
-      lu.push(Math.max(0, Math.min(1, l)));
-    }
-    if (!behind) fillTri(p, lu);
+  for (const [i0, i1, i2, mat] of OPAQUE_TRIS) {
+    const t = shadeTri(i0, i1, i2, DARK.has(mat) ? 0.13 : 1.0);
+    if (t) fillTri(t.p, t.lu, false);
+  }
+  // tinted, semi-transparent glass: depth-tested against the opaque pass but
+  // blended rather than z-written, so seats show through like real glazing
+  for (const [i0, i1, i2] of GLASS_TRIS) {
+    const t = shadeTri(i0, i1, i2, 0.55);
+    if (t) fillTri(t.p, t.lu, true);
   }
 
   const small = new Float32Array(W * H);
@@ -177,12 +275,15 @@ const BAYER = (() => {
   return m;
 })();
 
-function dither(lum) {
-  const px = Buffer.alloc(W * H * 3);
+// RGBA: "paper" pixels go fully transparent so the card has no background of its
+// own and just sits on whatever page (or theme) it's viewed against.
+function dither(lum, ink) {
+  const px = Buffer.alloc(W * H * 4);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const c = lum[y * W + x] > BAYER[y & 7][x & 7] ? PAPER : INK;
-    const o = (y * W + x) * 3;
-    px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2];
+    const isInk = lum[y * W + x] <= BAYER[y & 7][x & 7];
+    const o = (y * W + x) * 4;
+    if (isInk) { px[o] = ink[0]; px[o + 1] = ink[1]; px[o + 2] = ink[2]; px[o + 3] = 255; }
+    else px[o + 3] = 0;
   }
   return px;
 }
@@ -211,6 +312,17 @@ function png(rgb, w, h) {
     chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0)),
   ]);
 }
+function pngRGBA(rgba, w, h) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 6;                         // 8-bit, color type 6 = RGBA
+  const raw = Buffer.alloc(h * (w * 4 + 1));
+  for (let y = 0; y < h; y++) rgba.copy(raw, y * (w * 4 + 1) + 1, y * w * 4, (y + 1) * w * 4);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
 
 // ---------- output ----------
 if (process.env.GRAY !== undefined) {
@@ -218,36 +330,48 @@ if (process.env.GRAY !== undefined) {
   const g = Buffer.alloc(W * H * 3);
   for (let i = 0; i < W * H; i++) { const v = Math.round(lum[i] * 255); g[i * 3] = v; g[i * 3 + 1] = v; g[i * 3 + 2] = v; }
   fs.writeFileSync('gray.png', png(g, W, H));
-  fs.writeFileSync('dith.png', png(dither(lum), W, H));
+  fs.writeFileSync('dith.png', pngRGBA(dither(lum, INK), W, H));
   console.log(`car ${CAR_LENGTH.toFixed(2)} x ${CAR_W.toFixed(2)} x ${CAR_H.toFixed(2)} m - wrote gray.png + dith.png`);
   process.exit(0);
 }
 
 const out = process.argv[2];
 if (!out) { console.error('usage: node tools/render-s15.js <out.svg>'); process.exit(1); }
+const outLight = out.replace(/\.svg$/, '-light.svg');
+const outDark = out.replace(/\.svg$/, '-dark.svg');
 
-const b64 = [];
+// Render luminance once per frame (lighting/geometry is theme-independent), then
+// dither it twice: dark ink for a light page, light ink for a dark page. Both
+// variants have a fully transparent background (see dither()) - no card, no
+// colour to match, so it always blends with whatever theme is showing.
+const LIGHT_INK = [0x17, 0x17, 0x21];
+const DARK_INK = [0xe6, 0xe4, 0xda];
+
+const lums = [];
 for (let i = 0; i < FRAMES; i++) {
-  b64.push(png(dither(renderFrame((i / FRAMES) * Math.PI * 2 + Math.PI * 0.25)), W, H).toString('base64'));
+  lums.push(renderFrame((i / FRAMES) * Math.PI * 2 + Math.PI * 0.25));
   process.stdout.write(`frame ${i + 1}/${FRAMES}\r`);
 }
+console.log();
 
-const DUR = 4.0;
+const DUR = 9.0;
 const kt = [];
 for (let i = 0; i <= FRAMES; i++) kt.push((i / FRAMES).toFixed(5));
-const images = b64.map((d, i) => {
-  const vals = [];
-  for (let k = 0; k <= FRAMES; k++) vals.push((k % FRAMES === i) ? 1 : 0);
-  return `  <image x="0" y="0" width="${W}" height="${H}" opacity="${i === 0 ? 1 : 0}" xlink:href="data:image/png;base64,${d}">
+
+function buildSvg(path, ink, textColor) {
+  const b64 = lums.map(lum => pngRGBA(dither(lum, ink), W, H).toString('base64'));
+  const images = b64.map((d, i) => {
+    const vals = [];
+    for (let k = 0; k <= FRAMES; k++) vals.push((k % FRAMES === i) ? 1 : 0);
+    return `  <image x="0" y="0" width="${W}" height="${H}" opacity="${i === 0 ? 1 : 0}" xlink:href="data:image/png;base64,${d}">
     <animate attributeName="opacity" dur="${DUR}s" repeatCount="indefinite" calcMode="discrete" keyTimes="${kt.join(';')}" values="${vals.join(';')}"/>
   </image>`;
-}).join('\n');
+  }).join('\n');
 
-const LB = H + 15;
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${W} ${H + 26}" width="${W}" height="${H + 26}" shape-rendering="crispEdges" image-rendering="pixelated">
-  <rect width="100%" height="100%" fill="#f2f0ec"/>
+  const LB = H + 15;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${W} ${H + 26}" width="${W}" height="${H + 26}" shape-rendering="crispEdges" image-rendering="pixelated">
 ${images}
-  <g font-family="Consolas,'Courier New',monospace" font-size="7" fill="#17171f" letter-spacing="0.6">
+  <g font-family="Consolas,'Courier New',monospace" font-size="7" fill="${textColor}" letter-spacing="0.6">
     <text x="10" y="${LB}">NISSAN SILVIA S15</text>
     <text x="10" y="${LB + 9}" opacity="0.62">SR20DET / JPN-TOKYO</text>
     <text x="${W - 10}" y="${LB}" text-anchor="end">CHAYAPOL SURIYAJAN</text>
@@ -255,5 +379,9 @@ ${images}
   </g>
 </svg>
 `;
-fs.writeFileSync(out, svg);
-console.log(`\nwrote ${out} - ${(svg.length / 1024).toFixed(1)} KB, ${FRAMES} frames`);
+  fs.writeFileSync(path, svg);
+  console.log(`wrote ${path} - ${(svg.length / 1024).toFixed(1)} KB, ${FRAMES} frames`);
+}
+
+buildSvg(outLight, LIGHT_INK, '#17171f');
+buildSvg(outDark, DARK_INK, '#e6e4da');
