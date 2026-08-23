@@ -19,7 +19,7 @@ Name       : Chayapol Suriyajan
 Location   : Thailand
 Born       : 2011-10-01
 School     : Satit CMU Demonstration School (DEMON 57)
-Languages  : Python, HTML
+Languages  : Python, HTML, TypeScript
 Status     : still learning, still building
 --------------------
 $ _
