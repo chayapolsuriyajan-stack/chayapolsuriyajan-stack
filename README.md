@@ -32,6 +32,7 @@ $ _
 | [phantom-traffic-jams](https://github.com/chayapolsuriyajan-stack/phantom-traffic-jams) | Why traffic jams appear out of nothing — IDM + Nagel-Schreckenberg simulator ([demo](https://chayapolsuriyajan-stack.github.io/phantom-traffic-jams/)) |
 | [AquaMonitor](https://github.com/chayapolsuriyajan-stack/AquaMonitor) | Water-quality checker ([live](https://water-quality-checker-five.vercel.app)) |
 | [berretta](https://github.com/chayapolsuriyajan-stack/berretta) / [berretta-web](https://github.com/chayapolsuriyajan-stack/berretta-web) | Spaghetti-western FPS — Godot source, plus a self-contained Three.js browser port |
+| [scratch-ai-ide](https://github.com/chayapolsuriyajan-stack/scratch-ai-ide) | Scratch 3 editor an AI drives over MCP — goboscript text ⇄ blocks, WebGPU-accelerated custom blocks, and a tic-tac-toe AI that learns by reinforcement (exports to vanilla Scratch) |
 | [minicode](https://github.com/chayapolsuriyajan-stack/minicode) | ~10 MB VS Code-style IDE — Tauri shell, Monaco editor, real extension API |
 | [rubiks-graph-wallpaper](https://github.com/chayapolsuriyajan-stack/rubiks-graph-wallpaper) | Live wallpaper: a Rubik's Cube scrambles and solves itself beside the permutation graph of its 54 stickers |
 | [StarWallpaper](https://github.com/chayapolsuriyajan-stack/StarWallpaper) | Live wallpaper: the real night sky turning around the north celestial pole as a star-trail photo |
